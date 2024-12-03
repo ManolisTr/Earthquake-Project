@@ -19,104 +19,145 @@
 # META   }
 # META }
 
+# MARKDOWN ********************
+
+# # Cold Layer Notebook: Earthquake Events Processing
+# 
+# This notebook processes data from the Silver Layer to generate a refined dataset for the Gold Layer. It enriches the data with geolocation details and classifies earthquake events based on their significance.
+# 
+# ---
+# 
+# ## Objectives
+# 
+# 1. **Geographical Enrichment**:
+#    - Add the `country_code` to each earthquake event by performing reverse geocoding using latitude and longitude.
+# 
+# 2. **Significance Classification**:
+#    - Classify earthquake events into `Low`, `Moderate`, or `High` significance categories based on their `sig` value.
+# 
+# 3. **Data Output**:
+#    - Append the enriched and classified data to the `earthquake_events_gold` table for further analysis.
+# 
+# ---
+# 
+# ## Workflow
+# 
+# ### 1. Load Data
+# - Data is read from the Silver Layer table (`earthquake_events_silver`) as the input for processing.
+# 
+# ### 2. Reverse Geocoding
+# - The `latitude` and `longitude` of each earthquake event are used to derive the `country_code` via reverse geocoding.
+# - Batch processing is used to improve performance and reduce computational overhead.
+# 
+# ### 3. Significance Classification
+# - Each earthquake event is categorized into one of three significance levels:
+#   - **Low**: For events with a `sig` value below 100.
+#   - **Moderate**: For events with a `sig` value between 100 and 499.
+#   - **High**: For events with a `sig` value of 500 or more.
+# 
+# ### 4. Logging and Metrics
+# - The number of records processed is logged for monitoring purposes.
+# - Additional logging may capture the success or failure of key steps.
+# 
+# ### 5. Write to Gold Layer
+# - The processed data, including the enriched `country_code` and `sig_class`, is appended to the `earthquake_events_gold` table in the Gold Layer.
+# 
+# ---
+# 
+# ## Parameters
+# 
+# | Parameter         | Description                                        |
+# |--------------------|----------------------------------------------------|
+# | `latitude`         | Latitude of the earthquake location               |
+# | `longitude`        | Longitude of the earthquake location              |
+# | `sig`              | Significance of the earthquake event              |
+# | `country_code`     | Country code derived from reverse geocoding        |
+# | `sig_class`        | Classification based on the significance of event |
+# 
+# ---
+# 
+# ## Outputs
+# 
+# The Gold Layer table, `earthquake_events_gold`, contains the enriched data with the following new columns:
+# 1. **`country_code`**: The country where the earthquake occurred.
+# 2. **`sig_class`**: The significance classification (`Low`, `Moderate`, `High`).
+# 
+# ---
+# 
+# ## Notes
+# 
+# - **Reverse Geocoding**:
+#   - Batch processing is used to optimize geocoding and improve efficiency.
+#   - The `reverse_geocoder` library is used to derive the country code.
+# 
+# - **Significance Thresholds**:
+#   - The thresholds for significance classification can be adjusted based on the use case.
+# 
+# - **Performance Considerations**:
+#   - Ensure efficient execution by leveraging Spark’s parallel processing capabilities for batch operations.
+# 
+# - **Monitoring**:
+#   - Logs for record counts and processing steps are included to track pipeline performance.
+
+
 # CELL ********************
 
-from pyspark.sql.functions import when, col, udf
+from pyspark.sql.functions import when, col, lit, udf, pandas_udf, PandasUDFType
 from pyspark.sql.types import StringType
-# ensure the below library is installed on your fabric environment
 import reverse_geocoder as rg
+import pandas as pd
 
-# METADATA ********************
+# Read data from the Silver table
+df = spark.read.table("earthquake_events_silver")
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-df = spark.read.table("earthquake_events_silver")#.filter(col('time') > start_date)
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-
-def get_country_code(lat, lon):
+# Helper function for batch reverse geocoding
+def batch_reverse_geocode(latitudes, longitudes):
     """
-    Retrieve the country code for a given latitude and longitude.
+    Perform reverse geocoding for a batch of latitude and longitude values.
 
     Parameters:
-    lat (float or str): Latitude of the location.
-    lon (float or str): Longitude of the location.
+    latitudes (pd.Series): Series of latitude values.
+    longitudes (pd.Series): Series of longitude values.
 
     Returns:
-    str: Country code of the location, retrieved using the reverse geocoding API.
-
-    Example:
-    >>> get_country_details(48.8588443, 2.2943506)
-    'FR'
+    pd.Series: Series of country codes corresponding to the input coordinates.
     """
-    coordinates = (float(lat), float(lon))
-    return rg.search(coordinates)[0].get('cc')
+    coordinates = list(zip(latitudes, longitudes))
+    results = rg.search(coordinates)
+    return pd.Series([res.get('cc', 'Unknown') for res in results])
 
-# METADATA ********************
+# Register a pandas UDF for batch reverse geocoding
+@pandas_udf(StringType(), PandasUDFType.SCALAR)
+def batch_reverse_geocode_udf(latitudes: pd.Series, longitudes: pd.Series) -> pd.Series:
+    return batch_reverse_geocode(latitudes, longitudes)
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
+# Add country_code column
+df_with_location = df.withColumn(
+    "country_code",
+    batch_reverse_geocode_udf(col("latitude"), col("longitude"))
+)
 
-# CELL ********************
+# Define significance thresholds
+low_threshold = 100
+moderate_threshold = 500
 
-get_country_code_udf = udf(get_country_code,StringType())
+# Add significance classification
+df_with_location_sig_class = df_with_location.withColumn(
+    "sig_class",
+    when(col("sig") < lit(low_threshold), "Low")
+    .when((col("sig") >= lit(low_threshold)) & (col("sig") < lit(moderate_threshold)), "Moderate")
+    .otherwise("High")
+)
 
-# METADATA ********************
+# Log record count
+record_count = df_with_location_sig_class.count()
+print(f"Number of records processed: {record_count}")
 
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# adding country_code and city attributes
-df_with_location = df.withColumn("country_code", get_country_code_udf(col("latitude"), col("longitude")))
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# adding significance classification
-df_with_location_sig_class = \
-                            df_with_location.\
-                                withColumn('sig_class', 
-                                            when(col("sig") < 100, "Low").\
-                                            when((col("sig") >= 100) & (col("sig") < 500), "Moderate").\
-                                            otherwise("High")
-                                            )
-
-# METADATA ********************
-
-# META {
-# META   "language": "python",
-# META   "language_group": "synapse_pyspark"
-# META }
-
-# CELL ********************
-
-# appending the data to the gold table
+# Write to the Gold table
 df_with_location_sig_class.write.mode('append').saveAsTable('earthquake_events_gold')
+
+print("Data successfully written to the Gold table: earthquake_events_gold")
+
 
 # METADATA ********************
 

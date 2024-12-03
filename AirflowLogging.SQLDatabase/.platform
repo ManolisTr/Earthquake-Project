@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "SQLDatabase",
+    "displayName": "AirflowLogging"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "aa3ea9b6-f69a-40c8-a1d9-805bd36783f0"
+  }
+}
